@@ -1,0 +1,5 @@
+{
+  "name": "Controle de Faltas - Pastoral de Acólitos",
+  "description": "Sistema de gestão de presenças e faltas para a Pastoral de Acólitos, com acompanhamento por data e estatísticas individuais.",
+  "requestFramePermissions": []
+}
