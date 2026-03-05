@@ -142,7 +142,7 @@ async function startServer() {
   });
 
   const distPath = path.join(__dirname, "dist");
-  const isProduction = process.env.NODE_ENV === "production";
+  const isProduction = process.env.NODE_ENV === "production" || process.env.VITE_DEV !== "true";
 
   // API routes
   app.get("/api/health", (req, res) => {
@@ -159,6 +159,10 @@ async function startServer() {
   if (isProduction) {
     console.log(`[PROD] Serving static files from: ${distPath}`);
     
+    if (!fs.existsSync(distPath)) {
+      console.error(`CRITICAL: dist directory not found at ${distPath}`);
+    }
+
     // Serve static files from dist
     app.use(express.static(distPath));
 
