@@ -29,7 +29,7 @@ interface Absence {
   id: string;
   date: string;
   type: 'justified' | 'unjustified';
-  category: 'missa' | 'reuniao' | 'formacao';
+  category: 'missa' | 'reuniao';
   reason?: string;
 }
 
@@ -43,15 +43,67 @@ const INITIAL_NAMES = [
   "Lincoln", "Maria Clara Duque", "Miguel Melo", "Rodrigo", "Lilian", 
   "Gabriel luiz", "Jhemilly", "Maria Livia", "Lucas", "Maria Clara Iung", 
   "Maria luiza", "Matheus", "Nathan", "Sarah", "Sara", 
-  "Ana Luiza Werneck", "Ana Luiza Souza", "Gabriel Garcia", "Ana Carla", "Gabriela"
+  "Ana Luiza Werneck", "Ana Luiza Souza", "Gabriel Garcia", "Ana Carla", "Gabriela",
+  "Mariana"
 ];
 
 const formatDate = (dateStr: string, options?: Intl.DateTimeFormatOptions) => {
   if (!dateStr) return '';
   const [year, month, day] = dateStr.split('-').map(Number);
-  // Month is 0-indexed in Date constructor
   const date = new Date(year, month - 1, day);
   return date.toLocaleDateString('pt-BR', options);
+};
+
+const getAcolyteStatus = (absences: Absence[]) => {
+  const unjustifiedAbsences = [...absences]
+    .filter(a => a.type === 'unjustified')
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  
+  const justifiedAbsences = [...absences]
+    .filter(a => a.type === 'justified')
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  const activeWarnings: { label: string, color: string, type: string, expiresIn?: number }[] = [];
+  const now = new Date();
+
+  if (unjustifiedAbsences.length >= 3) {
+    activeWarnings.push({ label: 'Adv. Verbal (S/J)', color: 'bg-amber-500 text-white', type: 'verbal' });
+  }
+  if (unjustifiedAbsences.length >= 5) {
+    activeWarnings.push({ label: 'Adv. Escrita (S/J)', color: 'bg-orange-500 text-white', type: 'written' });
+  }
+  if (unjustifiedAbsences.length >= 6) {
+    const triggerDate = new Date(unjustifiedAbsences[5].date);
+    const diffTime = now.getTime() - triggerDate.getTime();
+    const diffDays = diffTime / (1000 * 60 * 60 * 24);
+    
+    if (diffDays < 30) {
+      activeWarnings.push({ 
+        label: 'Suspensão', 
+        color: 'bg-red-600 text-white', 
+        type: 'suspension',
+        expiresIn: Math.ceil(30 - diffDays)
+      });
+    }
+  }
+
+  if (justifiedAbsences.length >= 5) {
+    activeWarnings.push({ label: 'Adv. Verbal (C/J)', color: 'bg-emerald-500 text-white', type: 'verbal_justified' });
+  }
+
+  return {
+    warnings: activeWarnings,
+    unjustified: unjustifiedAbsences.length,
+    justified: justifiedAbsences.length,
+    mainColor: activeWarnings.some(w => w.type === 'suspension') ? 'bg-red-100 text-red-600' :
+               activeWarnings.some(w => w.type === 'written') ? 'bg-orange-100 text-orange-600' :
+               activeWarnings.some(w => w.type === 'verbal' || w.type === 'verbal_justified') ? 'bg-amber-100 text-amber-600' :
+               'bg-emerald-100 text-emerald-600',
+    barColor: activeWarnings.some(w => w.type === 'suspension') ? 'bg-red-600' :
+              activeWarnings.some(w => w.type === 'written') ? 'bg-orange-50' :
+              activeWarnings.some(w => w.type === 'verbal' || w.type === 'verbal_justified') ? 'bg-amber-500' :
+              'bg-emerald-500'
+  };
 };
 
 export default function App() {
@@ -62,52 +114,56 @@ export default function App() {
   const [showAccessModal, setShowAccessModal] = useState(false);
   const [newAbsenceDate, setNewAbsenceDate] = useState(new Date().toISOString().split('T')[0]);
   const [newAbsenceType, setNewAbsenceType] = useState<'justified' | 'unjustified'>('unjustified');
-  const [newAbsenceCategory, setNewAbsenceCategory] = useState<'missa' | 'reuniao' | 'formacao'>('missa');
-  const [filterCategory, setFilterCategory] = useState<'all' | 'missa' | 'reuniao' | 'formacao'>('all');
+  const [newAbsenceCategory, setNewAbsenceCategory] = useState<'missa' | 'reuniao'>('missa');
+  const [filterCategory, setFilterCategory] = useState<'all' | 'missa' | 'reuniao'>('all');
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [showInstallGuide, setShowInstallGuide] = useState(false);
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
 
-  // WebSocket Connection
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
-    const ws = new WebSocket(wsUrl);
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: NodeJS.Timeout;
 
-    ws.onopen = () => {
-      console.log('Connected to server');
-      setIsConnected(true);
-    };
+    const connect = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}`;
+      ws = new WebSocket(wsUrl);
 
-    ws.onmessage = (event) => {
-      const { type, data } = JSON.parse(event.data);
-      if (type === 'INIT' || type === 'STATE_UPDATE') {
-        setAcolytes(data);
-        
-        // Update selected acolyte if open
-        if (selectedAcolyte) {
-          const updated = data.find((a: Acolyte) => a.id === selectedAcolyte.id);
-          if (updated) setSelectedAcolyte(updated);
+      ws.onopen = () => {
+        setIsConnected(true);
+      };
+
+      ws.onmessage = (event) => {
+        const { type, data } = JSON.parse(event.data);
+        if (type === 'INIT' || type === 'STATE_UPDATE') {
+          setAcolytes(data);
         }
-      }
+      };
+
+      ws.onclose = () => {
+        setIsConnected(false);
+        reconnectTimeout = setTimeout(connect, 3000);
+      };
+
+      setSocket(ws);
     };
 
-    ws.onclose = () => {
-      console.log('Disconnected from server');
-      setIsConnected(false);
-      // Reconnect after 3 seconds
-      setTimeout(() => {
-        setSocket(null);
-      }, 3000);
+    connect();
+
+    return () => {
+      if (ws) ws.close();
+      clearTimeout(reconnectTimeout);
     };
+  }, []);
 
-    setSocket(ws);
+  useEffect(() => {
+    if (selectedAcolyte) {
+      const updated = acolytes.find(a => a.id === selectedAcolyte.id);
+      if (updated) setSelectedAcolyte(updated);
+    }
+  }, [acolytes]);
 
-    return () => ws.close();
-  }, [selectedAcolyte?.id]); // Re-run if selected ID changes to ensure state update logic works
-
-  // PWA Install logic
   useEffect(() => {
     const handler = (e: any) => {
       e.preventDefault();
@@ -130,6 +186,11 @@ export default function App() {
   };
 
   const addAbsence = (acolyteId: string) => {
+    if (!socket || !isConnected) {
+      alert('Sem conexão com o servidor. Por favor, aguarde a bolinha verde piscar no topo.');
+      return;
+    }
+
     const newAbsence = {
       id: Math.random().toString(36).substr(2, 9),
       date: newAbsenceDate,
@@ -137,12 +198,10 @@ export default function App() {
       category: newAbsenceCategory
     };
 
-    if (socket && isConnected) {
-      socket.send(JSON.stringify({
-        type: 'ADD_ABSENCE',
-        payload: { acolyteId, absence: newAbsence }
-      }));
-    }
+    socket.send(JSON.stringify({
+      type: 'ADD_ABSENCE',
+      payload: { acolyteId, absence: newAbsence }
+    }));
 
     setIsAddingAbsence(false);
     setNewAbsenceType('unjustified');
@@ -174,9 +233,7 @@ export default function App() {
   const exportData = () => {
     const dataStr = JSON.stringify(acolytes, null, 2);
     const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-    
     const exportFileDefaultName = `acolitos_faltas_${new Date().toISOString().split('T')[0]}.json`;
-    
     const linkElement = document.createElement('a');
     linkElement.setAttribute('href', dataUri);
     linkElement.setAttribute('download', exportFileDefaultName);
@@ -186,20 +243,14 @@ export default function App() {
   const importData = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
         const content = e.target?.result as string;
         const importedData = JSON.parse(content);
-        
-        // Basic validation
         if (Array.isArray(importedData) && importedData.every(a => a.name && Array.isArray(a.absences))) {
           if (socket && isConnected) {
-            socket.send(JSON.stringify({
-              type: 'IMPORT_DATA',
-              payload: importedData
-            }));
+            socket.send(JSON.stringify({ type: 'IMPORT_DATA', payload: importedData }));
           }
           alert('Dados importados com sucesso!');
         } else {
@@ -210,16 +261,13 @@ export default function App() {
       }
     };
     reader.readAsText(file);
-    // Reset input
     event.target.value = '';
   };
 
-  const shareApp = async () => {
-    setShowAccessModal(true);
-  };
+  const shareApp = () => setShowAccessModal(true);
 
   const copySharedLink = async () => {
-    const sharedUrl = 'https://ais-pre-oms3vz7w3tmygdsvctque3-35791651476.us-east1.run.app';
+    const sharedUrl = window.location.origin;
     try {
       await navigator.clipboard.writeText(sharedUrl);
       alert('Link do aplicativo copiado para a área de transferência!');
@@ -228,9 +276,7 @@ export default function App() {
     }
   };
 
-  const printReport = () => {
-    window.print();
-  };
+  const printReport = () => window.print();
 
   return (
     <div className="min-h-screen bg-slate-50 pb-12">
@@ -264,46 +310,23 @@ export default function App() {
               </button>
 
               <div className="flex items-center gap-1 sm:gap-2">
-                <button 
-                  onClick={exportData}
-                  title="Exportar Dados"
-                  className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all"
-                >
+                <button onClick={exportData} title="Exportar Dados" className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all">
                   <Download size={18} className="sm:w-5 sm:h-5" />
                 </button>
                 <label className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all cursor-pointer">
                   <Upload size={18} className="sm:w-5 sm:h-5" />
                   <input type="file" accept=".json" className="hidden" onChange={importData} />
                 </label>
-                <button 
-                  onClick={shareApp}
-                  title="Compartilhar Link"
-                  className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all"
-                >
+                <button onClick={shareApp} title="Compartilhar Link" className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all">
                   <Share2 size={18} className="sm:w-5 sm:h-5" />
                 </button>
-                <button 
-                  onClick={printReport}
-                  title="Imprimir Relatório"
-                  className="hidden sm:block p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all"
-                >
+                <button onClick={printReport} title="Imprimir Relatório" className="hidden sm:block p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all">
                   <Printer size={20} />
                 </button>
               </div>
 
               <div className="bg-indigo-50 px-4 py-2 rounded-full border border-indigo-100 flex items-center gap-2">
                 <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-                <div className="flex flex-col sm:flex-row sm:gap-3">
-                  <span className="text-indigo-700 font-semibold text-[10px] sm:text-xs">
-                    {acolytes.reduce((acc, curr) => acc + curr.absences.filter(a => a.category === 'missa').length, 0)} Missas
-                  </span>
-                  <span className="text-indigo-700 font-semibold text-[10px] sm:text-xs">
-                    {acolytes.reduce((acc, curr) => acc + curr.absences.filter(a => a.category === 'reuniao').length, 0)} Reuniões
-                  </span>
-                  <span className="text-indigo-700 font-semibold text-[10px] sm:text-xs">
-                    {acolytes.reduce((acc, curr) => acc + curr.absences.filter(a => a.category === 'formacao').length, 0)} Formações
-                  </span>
-                </div>
               </div>
             </div>
           </div>
@@ -321,7 +344,7 @@ export default function App() {
             </div>
 
             <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
-              {(['all', 'missa', 'reuniao', 'formacao'] as const).map((cat) => (
+              {(['all', 'missa', 'reuniao'] as const).map((cat) => (
                 <button
                   key={cat}
                   onClick={() => setFilterCategory(cat)}
@@ -331,7 +354,7 @@ export default function App() {
                       : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'
                   }`}
                 >
-                  {cat === 'all' ? 'Todos' : cat === 'missa' ? 'Missas' : cat === 'reuniao' ? 'Reuniões' : 'Formações'}
+                  {cat === 'all' ? 'Todos' : cat === 'missa' ? 'Missas' : 'Reuniões'}
                 </button>
               ))}
             </div>
@@ -340,88 +363,67 @@ export default function App() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 mt-8">
-        {/* Access / Share Modal */}
+        {/* Access Modal */}
         <AnimatePresence>
           {showAccessModal && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-              <motion.div 
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.9, opacity: 0 }}
-                className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl"
-              >
+              <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl">
                 <div className="p-6">
                   <div className="flex justify-between items-center mb-6">
                     <div className="flex items-center gap-2">
-                      <div className="p-2 bg-indigo-100 rounded-lg text-indigo-600">
-                        <Smartphone size={20} />
-                      </div>
+                      <div className="p-2 bg-indigo-100 rounded-lg text-indigo-600"><Smartphone size={20} /></div>
                       <h3 className="text-xl font-bold text-slate-800">Acesso Mobile & PC</h3>
                     </div>
-                    <button 
-                      onClick={() => setShowAccessModal(false)}
-                      className="p-2 hover:bg-slate-100 rounded-full transition-all"
-                    >
-                      <X size={20} className="text-slate-400" />
-                    </button>
+                    <button onClick={() => setShowAccessModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-all"><X size={20} className="text-slate-400" /></button>
                   </div>
-
                   <div className="space-y-6">
                     <div className="flex flex-col items-center justify-center p-6 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200">
                       <div className="bg-white p-4 rounded-xl shadow-sm mb-4">
-                        <QRCodeSVG 
-                          value="https://ais-pre-oms3vz7w3tmygdsvctque3-35791651476.us-east1.run.app" 
-                          size={180}
-                          level="H"
-                          includeMargin={true}
-                        />
+                        <QRCodeSVG value={window.location.origin} size={180} level="H" includeMargin={true} />
                       </div>
-                      <p className="text-sm text-slate-500 text-center">
-                        Escaneie o QR Code com a câmera do seu celular para abrir o aplicativo instantaneamente.
-                      </p>
+                      <p className="text-sm text-slate-500 text-center">Escaneie o QR Code para abrir o app no celular.</p>
                     </div>
-
                     <div className="space-y-3">
                       <label className="block text-sm font-medium text-slate-700">Link Direto</label>
                       <div className="flex gap-2">
-                        <input 
-                          type="text" 
-                          readOnly 
-                          value="https://ais-pre-oms3vz7w3tmygdsvctque3-35791651476.us-east1.run.app"
-                          className="flex-1 px-4 py-2 bg-slate-100 border-none rounded-xl text-xs text-slate-600 outline-none"
-                        />
-                        <button 
-                          onClick={copySharedLink}
-                          className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all"
-                        >
-                          Copiar
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
-                      <div className="flex gap-3">
-                        <div className="text-amber-600 shrink-0">
-                          <CheckCircle2 size={18} />
-                        </div>
-                        <p className="text-xs text-amber-800 leading-relaxed">
-                          <strong>Dica:</strong> No celular, você pode adicionar este site à sua tela inicial para usá-lo como um aplicativo real!
-                        </p>
+                        <input type="text" readOnly value={window.location.origin} className="flex-1 px-4 py-2 bg-slate-100 border-none rounded-xl text-xs text-slate-600 outline-none" />
+                        <button onClick={copySharedLink} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all">Copiar</button>
                       </div>
                     </div>
                   </div>
-
-                  <button 
-                    onClick={() => setShowAccessModal(false)}
-                    className="w-full mt-6 py-3 bg-slate-800 text-white rounded-2xl font-bold hover:bg-slate-900 transition-all"
-                  >
-                    Fechar
-                  </button>
+                  <button onClick={() => setShowAccessModal(false)} className="w-full mt-6 py-3 bg-slate-800 text-white rounded-2xl font-bold hover:bg-slate-900 transition-all">Fechar</button>
                 </div>
               </motion.div>
             </div>
           )}
         </AnimatePresence>
+
+        {/* Rules Summary */}
+        <div className="mb-8">
+          <div className="bg-indigo-900 p-6 rounded-3xl text-white shadow-xl shadow-indigo-200 relative overflow-hidden">
+            <div className="relative z-10">
+              <p className="text-xs font-bold text-indigo-300 uppercase tracking-widest mb-3">Regras de Advertência</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-[10px]">
+                <div className="space-y-1">
+                  <p className="font-bold text-indigo-200 uppercase">Sem Justificativa:</p>
+                  <ul className="space-y-0.5 opacity-90">
+                    <li>• 3 faltas: Advertência Verbal</li>
+                    <li>• 5 faltas: Advertência por Escrito</li>
+                    <li>• 6 faltas: Suspensão (30 dias)</li>
+                  </ul>
+                </div>
+                <div className="space-y-1">
+                  <p className="font-bold text-indigo-200 uppercase">Com Justificativa:</p>
+                  <ul className="space-y-0.5 opacity-90">
+                    <li>• 5 faltas: Advertência Verbal</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+            <div className="absolute -right-4 -bottom-4 opacity-10"><AlertCircle size={120} /></div>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <AnimatePresence mode="popLayout">
             {filteredAcolytes.map((acolyte) => (
@@ -435,56 +437,40 @@ export default function App() {
                 onClick={() => setSelectedAcolyte(acolyte)}
                 className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-all cursor-pointer group relative overflow-hidden"
               >
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
-                      acolyte.absences.length > 3 ? 'bg-red-100 text-red-600' : 
-                      acolyte.absences.length > 0 ? 'bg-amber-100 text-amber-600' : 
-                      'bg-emerald-100 text-emerald-600'
-                    }`}>
-                      <User size={20} />
-                    </div>
-                    <div>
-                      <h3 className="font-semibold text-slate-800 group-hover:text-indigo-600 transition-colors">
-                        {acolyte.name}
-                      </h3>
-                      <p className="text-xs text-slate-500">
-                        {acolyte.absences.length === 0 ? 'Nenhuma falta' : 
-                         `${acolyte.absences.length} faltas (${acolyte.absences.filter(a => a.category === 'missa').length}M / ${acolyte.absences.filter(a => a.category === 'reuniao').length}R / ${acolyte.absences.filter(a => a.category === 'formacao').length}F)`}
-                      </p>
-                    </div>
-                  </div>
-                  <ChevronRight size={18} className="text-slate-300 group-hover:text-indigo-400 transition-all" />
+                <div className="absolute top-0 right-0 flex flex-col items-end">
+                  {getAcolyteStatus(acolyte.absences).warnings.length === 0 ? (
+                    <div className="px-3 py-1 bg-emerald-100 text-emerald-600 rounded-bl-xl text-[9px] font-black uppercase tracking-wider">Regular</div>
+                  ) : (
+                    getAcolyteStatus(acolyte.absences).warnings.map((w, idx) => (
+                      <div key={idx} className={`px-3 py-1 ${w.color} ${idx === 0 ? 'rounded-bl-xl' : ''} text-[9px] font-black uppercase tracking-wider shadow-sm`}>{w.label}</div>
+                    ))
+                  )}
                 </div>
 
-                {/* Progress Bar Mini */}
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${getAcolyteStatus(acolyte.absences).mainColor}`}><User size={20} /></div>
+                    <div>
+                      <h3 className="font-semibold text-slate-800 group-hover:text-indigo-600 transition-colors">{acolyte.name}</h3>
+                      <div className="flex flex-col gap-0.5">
+                        <p className="text-[10px] font-medium text-slate-400 uppercase">{acolyte.absences.length} faltas no total</p>
+                        {acolyte.absences.length > 0 && (
+                          <div className="flex gap-2 text-[10px]">
+                            <span className="text-red-500 font-bold">{getAcolyteStatus(acolyte.absences).unjustified} Sem Just.</span>
+                            <span className="text-emerald-600 font-bold">{getAcolyteStatus(acolyte.absences).justified} Com Just.</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="mt-4 h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
                   <motion.div 
                     initial={{ width: 0 }}
-                    animate={{ 
-                      width: `${Math.min(
-                        (filterCategory === 'all' 
-                          ? acolyte.absences.length 
-                          : acolyte.absences.filter(a => a.category === filterCategory).length
-                        ) * 20, 100
-                      )}%` 
-                    }}
-                    className={`h-full ${
-                      (filterCategory === 'all' ? acolyte.absences.length : acolyte.absences.filter(a => a.category === filterCategory).length) > 3 ? 'bg-red-500' : 
-                      (filterCategory === 'all' ? acolyte.absences.length : acolyte.absences.filter(a => a.category === filterCategory).length) > 0 ? 'bg-amber-500' : 
-                      'bg-emerald-500'
-                    }`}
+                    animate={{ width: `${Math.min((getAcolyteStatus(acolyte.absences).unjustified * 16.6) + (getAcolyteStatus(acolyte.absences).justified * 10), 100)}%` }}
+                    className={`h-full ${getAcolyteStatus(acolyte.absences).barColor}`}
                   />
-                </div>
-
-                {/* Print Only Absence List */}
-                <div className="print-only mt-4 space-y-1">
-                  {acolyte.absences.map(abs => (
-                    <div key={abs.id} className="text-xs border-b border-slate-100 py-1 flex justify-between">
-                      <span>{formatDate(abs.date)} ({abs.category === 'missa' ? 'M' : abs.category === 'reuniao' ? 'R' : 'F'})</span>
-                      <span className="font-bold">{abs.type === 'justified' ? 'Justificada' : 'Não Justificada'}</span>
-                    </div>
-                  ))}
                 </div>
               </motion.div>
             ))}
@@ -496,128 +482,90 @@ export default function App() {
       <AnimatePresence>
         {selectedAcolyte && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => {
-                setSelectedAcolyte(null);
-                setIsAddingAbsence(false);
-              }}
-              className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
-            />
-            
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden relative z-10"
-            >
-              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-200">
-                    <User size={24} />
-                  </div>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => { setSelectedAcolyte(null); setIsAddingAbsence(false); }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden relative z-10 flex flex-col max-h-[90vh]">
+              <div className="p-5 border-b border-slate-100 flex items-center justify-between shrink-0 bg-white">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-100"><User size={24} /></div>
                   <div>
-                    <h2 className="text-xl font-display font-bold text-slate-900">{selectedAcolyte.name}</h2>
-                    <p className="text-sm text-slate-500">Histórico de Faltas</p>
+                    <h2 className="text-xl font-bold text-slate-900 leading-tight">{selectedAcolyte.name}</h2>
+                    <div className="flex gap-2 mt-1.5">
+                      <div className="bg-slate-50 px-2 py-1 rounded-lg border border-slate-100">
+                        <span className="text-[8px] font-black text-slate-400 uppercase tracking-tighter block">Total</span>
+                        <span className="text-sm font-black text-indigo-600 leading-none">{selectedAcolyte.absences.length}</span>
+                      </div>
+                      <div className="bg-red-50 px-2 py-1 rounded-lg border border-red-100">
+                        <span className="text-[8px] font-black text-red-400 uppercase tracking-tighter block">S/ Just.</span>
+                        <span className="text-sm font-black text-red-600 leading-none">{getAcolyteStatus(selectedAcolyte.absences).unjustified}</span>
+                      </div>
+                      <div className="bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-100">
+                        <span className="text-[8px] font-black text-emerald-400 uppercase tracking-tighter block">C/ Just.</span>
+                        <span className="text-sm font-black text-emerald-600 leading-none">{getAcolyteStatus(selectedAcolyte.absences).justified}</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
-                <button 
-                  onClick={() => setSelectedAcolyte(null)}
-                  className="p-2 hover:bg-slate-100 rounded-full transition-colors"
-                >
-                  <X size={20} className="text-slate-400" />
-                </button>
+                <button onClick={() => setSelectedAcolyte(null)} className="p-2 hover:bg-slate-100 rounded-full transition-colors"><X size={20} className="text-slate-400" /></button>
               </div>
 
-              <div className="p-6 max-h-[60vh] overflow-y-auto">
+              <div className="flex-1 overflow-y-auto p-6">
+                {/* Warnings Summary */}
+                <div className="space-y-3 mb-8">
+                  <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Situação e Advertências</h3>
+                  {getAcolyteStatus(selectedAcolyte.absences).warnings.length === 0 ? (
+                    <div className="flex items-center gap-3 p-3 rounded-xl border bg-emerald-50 border-emerald-100 text-emerald-700">
+                      <CheckCircle2 size={20} className="shrink-0" />
+                      <div>
+                        <p className="text-[9px] font-black uppercase tracking-widest opacity-60 leading-none mb-1">Situação Atual</p>
+                        <p className="text-xs font-bold leading-none">Frequência em dia.</p>
+                      </div>
+                    </div>
+                  ) : (
+                    getAcolyteStatus(selectedAcolyte.absences).warnings.map((w, idx) => (
+                      <div key={idx} className={`flex items-center gap-3 p-3 rounded-xl border ${w.type === 'suspension' ? 'bg-red-50 border-red-100 text-red-900' : w.type === 'written' ? 'bg-orange-50 border-orange-100 text-orange-900' : 'bg-amber-50 border-amber-100 text-amber-900'}`}>
+                        <AlertCircle size={20} className="shrink-0" />
+                        <div>
+                          <p className="text-[9px] font-black uppercase tracking-widest opacity-60 leading-none mb-1">{w.type === 'suspension' ? '🚨 Suspensão Ativa' : w.type === 'written' ? '📄 Advertência por Escrito' : '🗣️ Advertência Verbal'}</p>
+                          <p className="text-xs font-bold leading-none">
+                            {w.type === 'suspension' ? `Suspenso por 30 dias. Faltam ${w.expiresIn} dias.` : w.type === 'written' ? 'Atingiu 5 faltas sem justificativa.' : w.type === 'verbal' ? 'Atingiu 3 faltas sem justificativa.' : 'Atingiu 5 faltas com justificativa.'}
+                          </p>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
                 <div className="flex items-center justify-between mb-6">
-                  <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Registros</h3>
-                  <button 
-                    onClick={() => setIsAddingAbsence(true)}
-                    className="flex items-center gap-2 text-sm font-medium text-indigo-600 hover:text-indigo-700 bg-indigo-50 px-3 py-1.5 rounded-lg transition-colors"
-                  >
-                    <Plus size={16} />
-                    Nova Falta
+                  <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Registros de Faltas</h3>
+                  <button onClick={() => setIsAddingAbsence(true)} className="flex items-center gap-2 text-sm font-medium text-indigo-600 hover:text-indigo-700 bg-indigo-50 px-3 py-1.5 rounded-lg transition-colors">
+                    <Plus size={16} /> Nova Falta
                   </button>
                 </div>
 
                 {isAddingAbsence && (
-                  <motion.div 
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    className="mb-6 p-4 bg-slate-50 rounded-2xl border border-slate-200"
-                  >
-                    <div className="grid grid-cols-1 gap-4">
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-2">Data da Falta</label>
-                        <input 
-                          type="date" 
-                          value={newAbsenceDate}
-                          onChange={(e) => setNewAbsenceDate(e.target.value)}
-                          className="w-full px-3 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
-                        />
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="mb-6 p-4 bg-slate-50 rounded-2xl border border-indigo-100 shadow-inner">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="col-span-2">
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Data da Falta</label>
+                        <input type="date" value={newAbsenceDate} onChange={(e) => setNewAbsenceDate(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none bg-white text-sm" />
                       </div>
-                      
                       <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-2">Categoria</label>
-                        <div className="flex gap-2">
-                          {(['missa', 'reuniao', 'formacao'] as const).map((cat) => (
-                            <button
-                              key={cat}
-                              onClick={() => setNewAbsenceCategory(cat)}
-                              className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold uppercase transition-all ${
-                                newAbsenceCategory === cat
-                                  ? 'bg-indigo-600 text-white'
-                                  : 'bg-white text-slate-500 border border-slate-200'
-                              }`}
-                            >
-                              {cat === 'missa' ? 'Missa' : cat === 'reuniao' ? 'Reunião' : 'Formação'}
-                            </button>
-                          ))}
-                        </div>
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Categoria</label>
+                        <select value={newAbsenceCategory} onChange={(e) => setNewAbsenceCategory(e.target.value as any)} className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none bg-white text-sm">
+                          <option value="missa">Missa</option>
+                          <option value="reuniao">Reunião</option>
+                        </select>
                       </div>
-
                       <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-2">Tipo de Falta</label>
-                        <div className="flex gap-2">
-                          <button 
-                            onClick={() => setNewAbsenceType('unjustified')}
-                            className={`flex-1 py-2 rounded-xl text-sm font-medium transition-all ${
-                              newAbsenceType === 'unjustified' 
-                                ? 'bg-red-600 text-white shadow-md' 
-                                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-                            }`}
-                          >
-                            Não Justificada
-                          </button>
-                          <button 
-                            onClick={() => setNewAbsenceType('justified')}
-                            className={`flex-1 py-2 rounded-xl text-sm font-medium transition-all ${
-                              newAbsenceType === 'justified' 
-                                ? 'bg-emerald-600 text-white shadow-md' 
-                                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-                            }`}
-                          >
-                            Justificada
-                          </button>
-                        </div>
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Tipo</label>
+                        <select value={newAbsenceType} onChange={(e) => setNewAbsenceType(e.target.value as any)} className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none bg-white text-sm">
+                          <option value="unjustified">Não Justificada</option>
+                          <option value="justified">Justificada</option>
+                        </select>
                       </div>
-
-                      <div className="flex gap-2 pt-2">
-                        <button 
-                          onClick={() => addAbsence(selectedAcolyte.id)}
-                          className="flex-1 bg-indigo-600 text-white px-4 py-2.5 rounded-xl font-medium hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-100"
-                        >
-                          Registrar Falta
-                        </button>
-                        <button 
-                          onClick={() => setIsAddingAbsence(false)}
-                          className="px-4 py-2.5 rounded-xl font-medium text-slate-600 hover:bg-slate-200 transition-colors"
-                        >
-                          Cancelar
-                        </button>
+                      <div className="col-span-2 flex gap-2 pt-1">
+                        <button onClick={() => addAbsence(selectedAcolyte.id)} className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-100">Registrar Falta</button>
+                        <button onClick={() => setIsAddingAbsence(false)} className="px-4 py-2 rounded-xl text-sm font-bold text-slate-500 hover:bg-slate-200 transition-colors">Cancelar</button>
                       </div>
                     </div>
                   </motion.div>
@@ -625,58 +573,23 @@ export default function App() {
 
                 <div className="space-y-3">
                   {selectedAcolyte.absences.length === 0 ? (
-                    <div className="text-center py-12">
-                      <div className="w-16 h-16 bg-emerald-50 text-emerald-500 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <CheckCircle2 size={32} />
-                      </div>
-                      <p className="text-slate-500 font-medium">Nenhuma falta registrada!</p>
-                      <p className="text-slate-400 text-sm">Este acólito está com 100% de presença.</p>
-                    </div>
+                    <div className="text-center py-12 text-slate-500 font-medium">Nenhuma falta registrada!</div>
                   ) : (
-                    selectedAcolyte.absences.map((absence) => (
-                      <div 
-                        key={absence.id}
-                        className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 group"
-                      >
+                    [...selectedAcolyte.absences].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map((absence) => (
+                      <div key={absence.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100 group">
                         <div className="flex items-center gap-3">
-                          <div className={`p-2 rounded-lg ${
-                            absence.type === 'justified' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
-                          }`}>
-                            <Calendar size={18} />
-                          </div>
+                          <div className={`p-1.5 rounded-lg ${absence.type === 'justified' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}><Calendar size={16} /></div>
                           <div className="flex flex-col">
-                            <span className="font-medium text-slate-700">
-                              {formatDate(absence.date, {
-                                day: '2-digit',
-                                month: 'long',
-                                year: 'numeric'
-                              })}
-                            </span>
-                            <span className={`text-[10px] font-bold uppercase tracking-wider ${
-                              absence.type === 'justified' ? 'text-emerald-500' : 'text-red-500'
-                            }`}>
-                              {absence.category === 'missa' ? 'Missa' : absence.category === 'reuniao' ? 'Reunião' : 'Formação'} • {absence.type === 'justified' ? 'Justificada' : 'Não Justificada'}
+                            <span className="font-bold text-slate-700 text-xs">{formatDate(absence.date, { day: '2-digit', month: 'short', year: 'numeric' })}</span>
+                            <span className={`text-[9px] font-black uppercase tracking-wider ${absence.type === 'justified' ? 'text-emerald-500' : 'text-red-500'}`}>
+                              {absence.category === 'missa' ? 'Missa' : 'Reunião'} • {absence.type === 'justified' ? 'Justificada' : 'Não Justificada'}
                             </span>
                           </div>
                         </div>
-                        <button 
-                          onClick={() => removeAbsence(selectedAcolyte.id, absence.id)}
-                          className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                        >
-                          <Trash2 size={18} />
-                        </button>
+                        <button onClick={() => removeAbsence(selectedAcolyte.id, absence.id)} className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"><Trash2 size={16} /></button>
                       </div>
                     ))
                   )}
-                </div>
-              </div>
-
-              <div className="p-6 bg-slate-50 border-t border-slate-100">
-                <div className="flex items-center gap-2 text-amber-600 bg-amber-50 p-3 rounded-xl border border-amber-100">
-                  <AlertCircle size={18} />
-                  <p className="text-xs font-medium">
-                    Lembre-se de conversar com o acólito caso as faltas excedam o limite permitido.
-                  </p>
                 </div>
               </div>
             </motion.div>
@@ -684,61 +597,37 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Empty State when searching */}
+      {/* Empty State */}
       {filteredAcolytes.length === 0 && (
         <div className="text-center py-20">
-          <div className="w-20 h-20 bg-slate-100 text-slate-300 rounded-full flex items-center justify-center mx-auto mb-4">
-            <Search size={40} />
-          </div>
+          <div className="w-20 h-20 bg-slate-100 text-slate-300 rounded-full flex items-center justify-center mx-auto mb-4"><Search size={40} /></div>
           <h3 className="text-lg font-semibold text-slate-600">Nenhum acólito encontrado</h3>
           <p className="text-slate-400">Tente buscar por outro nome.</p>
         </div>
       )}
 
-      {/* Install Guide Modal */}
+      {/* Install Guide */}
       <AnimatePresence>
         {showInstallGuide && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowInstallGuide(false)}
-              className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
-            />
-            
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden relative z-10 p-6"
-            >
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowInstallGuide(false)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden relative z-10 p-6">
               <div className="text-center mb-6">
-                <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                  <Smartphone size={32} />
-                </div>
+                <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4"><Smartphone size={32} /></div>
                 <h2 className="text-xl font-display font-bold text-slate-900">Como Baixar o App</h2>
-                <p className="text-sm text-slate-500 mt-2">Siga os passos abaixo para instalar no seu celular:</p>
+                <p className="text-sm text-slate-500 mt-2">Siga os passos abaixo:</p>
               </div>
-
               <div className="space-y-4">
                 <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                  <h3 className="font-bold text-slate-800 text-sm mb-1">No Android (Chrome):</h3>
-                  <p className="text-xs text-slate-600">Toque nos 3 pontinhos no topo e escolha <span className="font-bold">"Instalar aplicativo"</span>.</p>
+                  <h3 className="font-bold text-slate-800 text-sm mb-1">Android (Chrome):</h3>
+                  <p className="text-xs text-slate-600">Toque nos 3 pontinhos e escolha <span className="font-bold">"Instalar aplicativo"</span>.</p>
                 </div>
-
                 <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                  <h3 className="font-bold text-slate-800 text-sm mb-1">No iPhone (Safari):</h3>
-                  <p className="text-xs text-slate-600">Toque no botão de <span className="font-bold">Compartilhar</span> (quadrado com seta) e escolha <span className="font-bold">"Adicionar à Tela de Início"</span>.</p>
+                  <h3 className="font-bold text-slate-800 text-sm mb-1">iPhone (Safari):</h3>
+                  <p className="text-xs text-slate-600">Toque em <span className="font-bold">Compartilhar</span> e escolha <span className="font-bold">"Adicionar à Tela de Início"</span>.</p>
                 </div>
               </div>
-
-              <button 
-                onClick={() => setShowInstallGuide(false)}
-                className="w-full mt-6 bg-indigo-600 text-white py-3 rounded-xl font-bold hover:bg-indigo-700 transition-colors"
-              >
-                Entendi
-              </button>
+              <button onClick={() => setShowInstallGuide(false)} className="w-full mt-6 bg-indigo-600 text-white py-3 rounded-xl font-bold hover:bg-indigo-700 transition-colors">Entendi</button>
             </motion.div>
           </div>
         )}

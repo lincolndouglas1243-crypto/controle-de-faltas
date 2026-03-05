@@ -27,11 +27,24 @@ db.exec(`
   );
 `);
 
+// Migration: Add category column if it doesn't exist (for existing databases)
+try {
+  db.prepare("SELECT category FROM absences LIMIT 1").get();
+} catch (e) {
+  console.log("Migration: Adding 'category' column to 'absences' table...");
+  try {
+    db.exec("ALTER TABLE absences ADD COLUMN category TEXT NOT NULL DEFAULT 'missa'");
+  } catch (alterErr) {
+    console.error("Migration failed:", alterErr);
+  }
+}
+
 const INITIAL_NAMES = [
   "Lincoln", "Maria Clara Duque", "Miguel Melo", "Rodrigo", "Lilian", 
   "Gabriel luiz", "Jhemilly", "Maria Livia", "Lucas", "Maria Clara Iung", 
   "Maria luiza", "Matheus", "Nathan", "Sarah", "Sara", 
-  "Ana Luiza Werneck", "Ana Luiza Souza", "Gabriel Garcia", "Ana Carla", "Gabriela"
+  "Ana Luiza Werneck", "Ana Luiza Souza", "Gabriel Garcia", "Ana Carla", "Gabriela",
+  "Mariana"
 ];
 
 // Seed initial names if empty
@@ -41,6 +54,12 @@ if (count.count === 0) {
   INITIAL_NAMES.forEach(name => {
     insert.run(Math.random().toString(36).substr(2, 9), name);
   });
+} else {
+  // Ensure Mariana is added if she's not there yet
+  const checkMariana = db.prepare("SELECT * FROM acolytes WHERE name = ?").get("Mariana");
+  if (!checkMariana) {
+    db.prepare("INSERT INTO acolytes (id, name) VALUES (?, ?)").run(Math.random().toString(36).substr(2, 9), "Mariana");
+  }
 }
 
 async function startServer() {
@@ -80,9 +99,18 @@ async function startServer() {
         
         if (type === "ADD_ABSENCE") {
           const { acolyteId, absence } = payload;
-          db.prepare("INSERT INTO absences (id, acolyte_id, date, type, category) VALUES (?, ?, ?, ?, ?)")
-            .run(absence.id, acolyteId, absence.date, absence.type, absence.category || 'missa');
-          broadcast({ type: "STATE_UPDATE", data: getFullState() });
+          if (!acolyteId || !absence || !absence.id || !absence.date || !absence.type) {
+            console.error("Invalid ADD_ABSENCE payload:", payload);
+            return;
+          }
+          
+          try {
+            db.prepare("INSERT INTO absences (id, acolyte_id, date, type, category) VALUES (?, ?, ?, ?, ?)")
+              .run(absence.id, acolyteId, absence.date, absence.type, absence.category || 'missa');
+            broadcast({ type: "STATE_UPDATE", data: getFullState() });
+          } catch (dbErr) {
+            console.error("Database error adding absence:", dbErr);
+          }
         }
         
         if (type === "REMOVE_ABSENCE") {
@@ -114,7 +142,7 @@ async function startServer() {
   });
 
   const distPath = path.join(__dirname, "dist");
-  const isProduction = process.env.NODE_ENV === "production" || process.env.VITE_DEV !== "true";
+  const isProduction = process.env.NODE_ENV === "production";
 
   // API routes
   app.get("/api/health", (req, res) => {
@@ -131,10 +159,6 @@ async function startServer() {
   if (isProduction) {
     console.log(`[PROD] Serving static files from: ${distPath}`);
     
-    if (!fs.existsSync(distPath)) {
-      console.error(`CRITICAL: dist directory not found at ${distPath}`);
-    }
-
     // Serve static files from dist
     app.use(express.static(distPath));
 
